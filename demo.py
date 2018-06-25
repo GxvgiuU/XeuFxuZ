@@ -1,4 +1,8 @@
 # -*- coding: utf-8 -*-
+from concurrent.futures import ProcessPoolExecutor
+import time
+
+from boltons.iterutils import chunked
 from gensim.models import KeyedVectors
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -10,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 
+print(time.asctime(), 'start')
 TEST_SIZE = 22000
 logistic_params = [
     {'C': [0.05, 0.2, 1]}
@@ -68,7 +73,8 @@ test_texts = get_texts(TEST_PATH, QUESTION_PATH)
 print('Generate features...')
 
 
-def get_features(sentences):
+def get_features(args):
+    sentences, model_w2v, model_c2v, tfidf_w, tfidf_c = args
     return_features = []
     for w1, w2, c1, c2 in sentences:
         futures = {}
@@ -131,11 +137,17 @@ def get_features(sentences):
 @click.command(context_settings=dict(ignore_unknown_options=True))
 @click.option("-c", "--cross_validate", type=int, default=5,
               help="Set the cross-validation number.")
-@click.option("-j", "--jobs", type=int, default=1,
+@click.option("-j", "--jobs", type=int, default=8,
               help="Set the number of parallel jobs.")
 def main(cross_validate, jobs):
-    features_train = get_features(train_texts)
-    features_test = get_features(test_texts)
+    features_train, features_test = [], []
+    pool = ProcessPoolExecutor(max_workers=jobs)
+    for text, feature in ((train_texts, features_train), (test_texts, features_test)):
+        args = chunked(text, len(text) // jobs + 1)
+        args = [(chunk, model_w2v, model_c2v, tfidf_w, tfidf_c)
+                for chunk in args]  # 多进程不共享全局变量，直接复制多份
+        for res in pool.map(get_features, args):
+            feature.extend(res)
 
     print('Transforming feature to matrices...')
     vectorizer = DictVectorizer()
@@ -159,7 +171,7 @@ def main(cross_validate, jobs):
     pred = grid.best_estimator_.predict_proba(vectorizer.transform(features_test))
     make_submission(pred[:, 1])
 
-    print('Complete')
+    print('Complete', time.asctime())
 
 
 if __name__ == '__main__':
