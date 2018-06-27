@@ -4,11 +4,13 @@ import time
 
 from boltons.iterutils import chunked
 from gensim.models import KeyedVectors
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import log_loss
 from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.svm import LinearSVC
 import click
 import numpy as np
 import pandas as pd
@@ -19,6 +21,10 @@ TEST_SIZE = 22000
 logistic_params = [
     {'C': [0.05, 0.2, 1]}
 ]
+svm_params = [
+    {'C': [0.05, 0.08, 0.1, 0.12, 0.15, 0.3, 0.5, 1, 2, 4], 'loss': ['squared_hinge']}
+]
+ALGORITHM = ['svm', 'maxent']
 
 
 def get_ids(qids):
@@ -135,11 +141,13 @@ def get_features(args):
 
 
 @click.command(context_settings=dict(ignore_unknown_options=True))
-@click.option("-c", "--cross_validate", type=int, default=5,
-              help="Set the cross-validation number.")
-@click.option("-j", "--jobs", type=int, default=8,
-              help="Set the number of parallel jobs.")
-def main(cross_validate, jobs):
+@click.option('-a', '--algorithm', type=click.Choice(ALGORITHM), default='maxent',
+              help='Algorithm used in training')
+@click.option('-c', '--cross_validate', type=int, default=5,
+              help='Set the cross-validation number.')
+@click.option('-j', '--jobs', type=int, default=8,
+              help='Set the number of parallel jobs.')
+def main(algorithm, cross_validate, jobs):
     features_train, features_test = [], []
     pool = ProcessPoolExecutor(max_workers=jobs)
     for text, feature in ((train_texts, features_train), (test_texts, features_test)):
@@ -156,19 +164,37 @@ def main(cross_validate, jobs):
     X, X_dev, Y, Y_dev = train_test_split(X_all, train['label'], test_size=TEST_SIZE, shuffle=False)
 
     print('Train classifier...')
-    grid = GridSearchCV(LogisticRegression(tol=1e-6, class_weight="balanced"), logistic_params,
-                        n_jobs=jobs, cv=cross_validate, verbose=1)
+    if algorithm == 'maxent':
+        grid = GridSearchCV(LogisticRegression(tol=1e-6, class_weight='balanced'), logistic_params,
+                            n_jobs=jobs, cv=cross_validate, verbose=1)
+    elif algorithm == 'svm':
+        grid = GridSearchCV(LinearSVC(class_weight='balanced'), svm_params, n_jobs=jobs,
+                            cv=cross_validate, verbose=1)
     grid.fit(X, Y)
+    clf = grid.best_estimator_
+    if algorithm == 'svm':
+        clf = CalibratedClassifierCV(LinearSVC(class_weight='balanced', **grid.best_params_))
+        clf.fit(X, Y)
 
     print('Predict dev...')
-    Y_pred_dev = grid.best_estimator_.predict_proba(X_dev)
+    Y_pred_dev = clf.predict_proba(X_dev)
     print('Dev log_loss', log_loss(Y_dev, Y_pred_dev, eps=1e-15))
 
     print('Train on all and predict test...')
-    grid = GridSearchCV(LogisticRegression(tol=1e-6, class_weight="balanced"), logistic_params,
-                        n_jobs=jobs, cv=cross_validate, verbose=1)
+    if algorithm == 'maxent':
+        grid = GridSearchCV(LogisticRegression(tol=1e-6, class_weight='balanced'), logistic_params,
+                            n_jobs=jobs, cv=cross_validate, verbose=1)
+    elif algorithm == 'svm':
+        grid = GridSearchCV(LinearSVC(class_weight='balanced'), svm_params, n_jobs=jobs,
+                            cv=cross_validate, verbose=1)
     grid.fit(X_all, train['label'])
-    pred = grid.best_estimator_.predict_proba(vectorizer.transform(features_test))
+    clf = grid.best_estimator_
+    if algorithm == 'svm':
+        clf = CalibratedClassifierCV(LinearSVC(class_weight='balanced', **grid.best_params_))
+        clf.fit(X_all, train['label'])
+
+    print('Predict test...')
+    pred = clf.predict_proba(vectorizer.transform(features_test))
     make_submission(pred[:, 1])
 
     print('Complete', time.asctime())
